@@ -1,0 +1,112 @@
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: maven-build-test
+spec:
+  workspaces:
+    - name: source
+    - name: maven-settings
+  steps:
+    - name: build-and-test
+      image: maven:3.9-eclipse-temurin-21
+      workingDir: $(workspaces.source.path)
+      command: ["mvn"]
+      args:
+        - "clean"
+        - "package"
+        - "--settings=$(workspaces.maven-settings.path)/settings.xml"
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: docker-build
+spec:
+  workspaces:
+    - name: source
+  params:
+    - name: IMAGE
+      type: string
+      description: Reference of the image to build
+  steps:
+    - name: build-and-push
+      image: gcr.io/kaniko-project/executor:latest
+      workingDir: $(workspaces.source.path)
+      env:
+        - name: DOCKER_CONFIG
+          value: /tekton/home/.docker
+      command:
+        - /kaniko/executor
+      args:
+        - --dockerfile=Dockerfile
+        - --context=$(workspaces.source.path)
+        - --destination=$(params.IMAGE)
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: counter-service-pipeline
+spec:
+  workspaces:
+    - name: shared-workspace
+    - name: maven-settings
+  tasks:
+    - name: fetch-repository
+      taskRef:
+        name: git-clone
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.revision)
+        - name: depth
+          value: "1"
+    
+    - name: build-and-test
+      taskRef:
+        name: maven-build-test
+      runAfter:
+        - fetch-repository
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+        - name: maven-settings
+          workspace: maven-settings
+    
+    - name: build-image
+      taskRef:
+        name: docker-build
+      runAfter:
+        - build-and-test
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+      params:
+        - name: IMAGE
+          value: "$(params.image-registry)/counter-service:$(params.image-tag)"
+---
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  name: counter-service-pipeline-run
+spec:
+  pipelineRef:
+    name: counter-service-pipeline
+  workspaces:
+    - name: shared-workspace
+      persistentVolumeClaim:
+        claimName: counter-service-workspace
+    - name: maven-settings
+      configMap:
+        name: maven-settings
+  params:
+    - name: repo-url
+      value: "https://github.com/username/counter-service.git"
+    - name: revision
+      value: "main"
+    - name: image-registry
+      value: "docker.io/username"
+    - name: image-tag
+      value: "latest"
